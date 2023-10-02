@@ -1,55 +1,22 @@
+from __future__ import annotations
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import NewType
-
-PlayID = NewType("PlayID", str)
-PlayType = NewType("PlayType", str)
-
-@dataclass(frozen=True)
-class Play:
-    name: str
-    type: PlayType
+from typing import Iterable, TypedDict
 
 
-@dataclass(frozen=True)
-class Performance:
+PlayID = str
+PlayType = str
+AllPlays = dict[PlayID, dict]
+
+
+class Performance(TypedDict):
     playID: PlayID
     audience: int
 
 
-@dataclass
-class Invoice:
+class Invoice(TypedDict):
     customer: str
     performances: list[Performance]
-
-    def __post_init__(self):
-        self.performances = [Performance(**p) for p in self.performances]
-
-
-Plays = dict[PlayID, Play]
-
-
-def map_invoice(invoice: dict) -> Invoice:
-    return Invoice(**invoice)
-
-
-def map_plays(plays: dict) -> Plays:
-    return {play_id: Play(**attr) for play_id, attr in plays.items()}
-
-
-def performance_amount(perf: Performance, play: Play):
-    if play.type == "tragedy":
-        amount = 40000
-        if perf.audience > 30:
-            amount += 1000 * (perf.audience - 30)
-    elif play.type == "comedy":
-        amount = 30000
-        if perf.audience > 20:
-            amount += 10000 + 500 * (perf.audience - 20)
-        amount += 300 * perf.audience
-    else:
-        raise ValueError(f'unknown type: {play.type}')
-
-    return amount
 
 
 @dataclass(frozen=True)
@@ -59,51 +26,92 @@ class StatementLine:
     seats: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class Statement:
     customer: str
-    statement_lines: list[StatementLine]
+    statement_lines: Iterable[StatementLine]
     credits: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class TextStatement(Statement):
     def render(self) -> str:
         result = f"Statement for {self.customer}\n"
         total = 0
         for line in self.statement_lines:
-            result += f" {line.play_name}: {format_as_dollars(line.amount/100)} ({line.seats} seats)\n"
+            result += f" {line.play_name}: {format_as_dollars(line.amount)} ({line.seats} seats)\n"
             total += line.amount
-        result += f'Amount owed is {format_as_dollars(total/100)}\n'
-        result += f'You earned {self.credits} credits\n'
+        result += f"Amount owed is {format_as_dollars(total)}\n"
+        result += f"You earned {self.credits} credits\n"
         return result
 
 
-def format_as_dollars(amount):
-    return f"${amount:0,.2f}"
+class Play(ABC):
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self):
+        return self._name
+
+    @abstractmethod
+    def amount(self, perf: Performance) -> int:
+        ...
+
+    @abstractmethod
+    def credits(self, perf: Performance) -> int:
+        ...
 
 
-def calculate_credits(perf: Performance, play: Play):
-    credits = max(perf.audience - 30, 0)
-    # add extra credit for every ten comedy attendees
-    if "comedy" == play.type:
-        credits += perf.audience // 5
-    return credits
+class Tragedy(Play):
+    def amount(self, perf: Performance) -> int:
+        amount = 40000
+        if perf["audience"] > 30:
+            amount += 1000 * (perf["audience"] - 30)
+        return amount
+
+    def credits(self, perf: Performance):
+        return max(perf["audience"] - 30, 0)
 
 
-def statement(_invoice: dict, _plays: dict, cls = TextStatement):
-    # Map everything to real types to better support type checking
-    invoice, plays = map_invoice(_invoice), map_plays(_plays)
+class Comedy(Play):
+    def amount(self, perf: Performance) -> int:
+        amount = 30000 + 300 * perf["audience"]
+        if perf["audience"] > 20:
+            amount += 10000 + 500 * (perf["audience"] - 20)
+        return amount
 
-    volume_credits = 0
-    lines = []
+    def credits(self, perf: Performance):
+        return max(perf["audience"] - 30, 0) + perf["audience"] // 5
 
-    for perf in invoice.performances:
-        # add volume credits
-        volume_credits += calculate_credits(perf, plays[perf.playID])
-        # generate a statement line
-        lines.append(
-            StatementLine(plays[perf.playID].name, performance_amount(perf, plays[perf.playID]), perf.audience)
-        )
 
-    return cls(invoice.customer, lines, volume_credits).render()
+def format_as_dollars(cents: int) -> str:
+    return f"${cents/100:0,.2f}"
+
+
+def create_play(play_type: PlayType, name: str) -> Play:
+    match play_type:
+        case "tragedy":
+            return Tragedy(name)
+        case "comedy":
+            return Comedy(name)
+        case _:
+            raise ValueError(f"unknown type: {play_type}")
+
+
+def statement(invoice: Invoice, plays: AllPlays, cls=TextStatement) -> str:
+    def get_type(perf: Performance):
+        return plays[perf["playID"]]["type"]
+
+    def get_name(perf: Performance):
+        return plays[perf["playID"]]["name"]
+
+    perfs = invoice["performances"]
+
+    all_plays = [create_play(get_type(perf), get_name(perf)) for perf in perfs]
+    statement_lines = (
+        StatementLine(play.name, play.amount(perf), perf["audience"])
+        for play, perf in zip(all_plays, perfs)
+    )
+    volume_credits = sum(play.credits(perf) for play, perf in zip(all_plays, perfs))
+    return cls(invoice["customer"], statement_lines, volume_credits).render()
