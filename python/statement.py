@@ -1,19 +1,19 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import functools
 from typing import Iterable, TypedDict
 
 
-PlayID = str
-PlayType = str
-AllPlays = dict[PlayID, dict]
+AllPlays = dict[str, dict[str, str]]
 
-
+# Just to have a little type-safety
 class Performance(TypedDict):
-    playID: PlayID
+    playID: str
     audience: int
 
 
+# Just to have a little type-safety
 class Invoice(TypedDict):
     customer: str
     performances: list[Performance]
@@ -21,6 +21,7 @@ class Invoice(TypedDict):
 
 @dataclass(frozen=True)
 class StatementLine:
+    """Representing a single line on the invoice"""
     play_name: str
     amount: int
     seats: int
@@ -28,30 +29,29 @@ class StatementLine:
 
 @dataclass(frozen=True)
 class Statement:
+    """Representing the final statement."""
     customer: str
     statement_lines: Iterable[StatementLine]
     credits: int
 
 
-@dataclass(frozen=True)
-class TextStatement(Statement):
-    def render(self) -> str:
-        result = f"Statement for {self.customer}\n"
-        total = 0
-        for line in self.statement_lines:
-            result += f" {line.play_name}: {format_as_dollars(line.amount)} ({line.seats} seats)\n"
-            total += line.amount
-        result += f"Amount owed is {format_as_dollars(total)}\n"
-        result += f"You earned {self.credits} credits\n"
-        return result
+def render_as_text(statement: Statement) -> str:
+    result = f"Statement for {statement.customer}\n"
+    total = 0
+    for line in statement.statement_lines:
+        result += f" {line.play_name}: {format_as_dollars(line.amount)} ({line.seats} seats)\n"
+        total += line.amount
+    result += f"Amount owed is {format_as_dollars(total)}\n"
+    result += f"You earned {statement.credits} credits\n"
+    return result
 
 
-class Play(ABC):
+class BillingStrategy(ABC):
     def __init__(self, name: str):
         self._name = name
 
     @property
-    def name(self):
+    def play(self):
         return self._name
 
     @abstractmethod
@@ -63,7 +63,7 @@ class Play(ABC):
         ...
 
 
-class Tragedy(Play):
+class TragedyBilling(BillingStrategy):
     def amount(self, perf: Performance) -> int:
         amount = 40000
         if perf["audience"] > 30:
@@ -74,7 +74,7 @@ class Tragedy(Play):
         return max(perf["audience"] - 30, 0)
 
 
-class Comedy(Play):
+class ComedyBilling(BillingStrategy):
     def amount(self, perf: Performance) -> int:
         amount = 30000 + 300 * perf["audience"]
         if perf["audience"] > 20:
@@ -89,29 +89,29 @@ def format_as_dollars(cents: int) -> str:
     return f"${cents/100:0,.2f}"
 
 
-def create_play(play_type: PlayType, name: str) -> Play:
+def create_billing(plays: AllPlays, perf: Performance) -> BillingStrategy:
+    play_type, play_name = plays[perf["playID"]]["type"], plays[perf["playID"]]["name"]
     match play_type:
         case "tragedy":
-            return Tragedy(name)
+            return TragedyBilling(play_name)
         case "comedy":
-            return Comedy(name)
+            return ComedyBilling(play_name)
         case _:
             raise ValueError(f"unknown type: {play_type}")
 
 
-def statement(invoice: Invoice, plays: AllPlays, cls=TextStatement) -> str:
-    def get_type(perf: Performance):
-        return plays[perf["playID"]]["type"]
-
-    def get_name(perf: Performance):
-        return plays[perf["playID"]]["name"]
-
+def calculate(invoice: Invoice, plays: AllPlays) -> Statement:
     perfs = invoice["performances"]
-
-    all_plays = [create_play(get_type(perf), get_name(perf)) for perf in perfs]
-    statement_lines = (
-        StatementLine(play.name, play.amount(perf), perf["audience"])
-        for play, perf in zip(all_plays, perfs)
+    all_billings = [create_billing(plays, perf) for perf in perfs]
+    return Statement(
+        invoice["customer"],
+        (
+            StatementLine(billing.play, billing.amount(perf), perf["audience"])
+            for billing, perf in zip(all_billings, perfs)
+        ),
+        sum(billing.credits(perf) for billing, perf in zip(all_billings, perfs))
     )
-    volume_credits = sum(play.credits(perf) for play, perf in zip(all_plays, perfs))
-    return cls(invoice["customer"], statement_lines, volume_credits).render()
+
+
+def statement(invoice: Invoice, plays: AllPlays) -> str:
+    return render_as_text(calculate(invoice, plays))
